@@ -1,0 +1,299 @@
+= ActiveRT Core
+:toc:
+:toclevels: 2
+:sectnums:
+
+Lightweight C++ utilities for *ESP32 FreeRTOS* applications.
+
+ActiveRT provides deterministic, ISR-safe abstractions for tasks,
+queues and memory pools, designed specifically for real-time embedded systems.
+It is **FreeRTOS-specific** and intentionally minimal.
+
+== Architecture Overview
+
+ActiveRT is a small runtime layer built on top of *FreeRTOS*.
+It does not replace FreeRTOS primitives, but wraps them in explicit,
+type-safe C++ abstractions.
+
+=== Design Goals
+
+* Deterministic execution
+* No dynamic allocation during runtime
+* ISR-safe APIs
+* Explicit ownership and lifetime
+* Suitable for ESP32 + Arduino + PlatformIO
+
+=== Core Principles
+
+* Objects using FreeRTOS primitives must be created *after* the scheduler starts
+* ISR code must be minimal and non-blocking
+* Ownership must be explicit — no hidden globals or magic singletons
+
+=== Typical Data Flow
+
+[source]
+----
+ISR
+ ↓
+ActivePool::acquireFromISR()
+ ↓
+ActiveQueue<T*>
+ ↓
+ActiveTask
+ ↓
+ActivePool::release()
+----
+
+== ActiveTask
+
+`ActiveTask` is an object-oriented wrapper around a FreeRTOS task.
+
+It allows implementing tasks as C++ classes using `setup()` and `loop()`
+methods, similar to the Arduino programming model.
+
+=== OS Mechanism
+
+* Wraps `xTaskCreate()` / `xTaskCreatePinnedToCore()`
+* Uses a static task entry point internally
+* Runs on top of the FreeRTOS scheduler
+
+=== Lifecycle
+
+[source]
+----
+taskEntryPoint()
+ ├─ setup()   // called once
+ └─ loop()    // called repeatedly
+----
+
+=== Characteristics
+
+* FreeRTOS-specific
+* Cooperative by default (explicit delay or yield)
+* No implicit blocking
+* Clear ownership of task resources
+
+=== Example
+
+[source,cpp]
+----
+class WorkerTask : public ActiveTask {
+public:
+    WorkerTask()
+        : ActiveTask("worker", 4096, 2) {}
+
+    void setup() override {
+        // initialization
+    }
+
+    void loop() override {
+        // task logic
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+};
+----
+
+== ActiveQueue and ActiveQueueRef
+
+=== ActiveQueue<T>
+
+`ActiveQueue<T>` is an owning, type-safe wrapper around a FreeRTOS queue.
+
+It is used for communication between tasks and from ISR to task.
+
+==== OS Mechanism
+
+* Wraps `QueueHandle_t`
+* Uses `xQueueCreate`, `xQueueSend`, `xQueueReceive`
+* Supports ISR-safe variants
+
+==== Characteristics
+
+* Owns the underlying FreeRTOS queue
+* Copies elements of type `T`
+* Thread-safe and ISR-safe
+* No allocation after construction
+
+==== Example
+
+[source,cpp]
+----
+struct Message {
+    int value;
+};
+
+ActiveQueue<Message> queue(10);
+
+Message msg{42};
+queue.send(msg);
+
+Message rx;
+queue.receive(rx, portMAX_DELAY);
+----
+
+==== ISR Usage
+
+[source,cpp]
+----
+BaseType_t hpw = pdFALSE;
+queue.sendFromISR(msg, &hpw);
+
+if (hpw) {
+    portYIELD_FROM_ISR();
+}
+----
+
+=== ActiveQueueRef<T>
+
+`ActiveQueueRef<T>` is a *non-owning reference* to an existing FreeRTOS queue.
+
+It allows passing queue access into tasks without transferring ownership.
+
+==== Characteristics
+
+* Lightweight wrapper (stores only `QueueHandle_t`)
+* Same API as `ActiveQueue<T>`
+* Does not create or delete the queue
+
+==== Example
+
+[source,cpp]
+----
+ActiveQueue<Message> queue(10);
+ActiveQueueRef<Message> ref(queue.nativeHandle());
+----
+
+== ActivePool and ActivePoolRef
+
+=== Motivation
+
+Dynamic memory allocation is unsafe in ISR context and undesirable
+in real-time systems due to fragmentation and nondeterministic timing.
+
+`ActivePool<T>` provides a deterministic alternative.
+
+=== ActivePool<T>
+
+`ActivePool<T>` is a fixed-size, ISR-safe object pool implemented
+using a FreeRTOS queue of pointers.
+
+==== OS Mechanism
+
+[source]
+----
+static T objects[N];
+Queue<T*> freeList;
+----
+
+* Objects are preallocated
+* Queue stores pointers to free objects
+* `acquire()` removes a pointer from the queue
+* `release()` returns it back
+
+==== Characteristics
+
+* FreeRTOS-specific
+* No dynamic allocation after construction
+* Constant-time operations (O(1))
+* Explicit ownership transfer
+* ISR-safe acquire and release
+
+==== Typical Pattern
+
+[source]
+----
+ISR
+ ├─ acquireFromISR()
+ ├─ fill object
+ └─ enqueue pointer
+
+Task
+ ├─ receive pointer
+ ├─ process object
+ └─ release()
+----
+
+==== Example (ESP-NOW style)
+
+[source,cpp]
+----
+ActivePool<Packet> pool(8);
+ActiveQueue<Packet*> workQueue(8);
+
+void onReceiveISR(...) {
+    BaseType_t hpw = pdFALSE;
+
+    Packet* pkt = pool.acquireFromISR(&hpw);
+    if (!pkt) {
+        return; // drop packet
+    }
+
+    workQueue.sendFromISR(pkt, &hpw);
+
+    if (hpw) {
+        portYIELD_FROM_ISR();
+    }
+}
+----
+
+=== ActivePoolRef<T>
+
+`ActivePoolRef<T>` is a non-owning reference to an existing `ActivePool`.
+
+It allows tasks to use the pool without owning or managing its lifetime.
+
+==== Characteristics
+
+* Lightweight wrapper
+* ISR-safe
+* Same acquire/release API as `ActivePool<T>`
+* Does not manage memory or lifetime
+
+==== Example
+
+[source,cpp]
+----
+ActivePool<Packet> pool(8);
+ActivePoolRef<Packet> poolRef(pool.nativeHandle());
+----
+
+== StaticString
+
+`StaticString<N>` is a fixed-capacity, real-time safe string class.
+
+It stores text in an internal buffer of compile-time defined size
+and never performs dynamic memory allocation.
+
+=== Characteristics
+
+* FreeRTOS-friendly
+* No heap usage
+* Deterministic execution
+* Copyable and queue-safe
+* Truncates on overflow (no exceptions)
+
+=== Example
+
+[source,cpp]
+----
+StaticString<32> name("esp32");
+name.append("-node");
+----
+
+
+== Important Rules and Best Practices
+
+WARNING: Objects that use FreeRTOS primitives (`Queue`, `Task`, `Semaphore`)
+must be constructed *after* the FreeRTOS scheduler is initialized.
+
+WARNING: Avoid static initialization and classic singleton patterns.
+
+TIP: Prefer explicit ownership and dependency injection.
+
+== Design Philosophy
+
+[quote]
+____
+Deterministic behavior is more important than convenience.
+Explicit ownership is better than hidden global access.
+____
