@@ -257,6 +257,367 @@ ActivePool<Packet> pool(8);
 ActivePoolRef<Packet> poolRef(pool.nativeHandle());
 ----
 
+== SystemTimer (FreeRTOS Software Timer Wrapper)
+
+`SystemTimer` is a lightweight C++ wrapper around **FreeRTOS software timers**
+(`xTimerCreate`) designed for **event-driven systems** on ESP32.
+
+It integrates directly with the Active RT Framework by sending timer events
+to an `ActiveQueue` via `ActiveQueueRef`, allowing all timing logic to be
+handled inside normal tasks instead of timer callbacks.
+
+This design avoids polling, blocking delays, and complex timing logic
+inside application tasks.
+
+---
+
+=== Design Goals
+
+* Fully event-driven (no `vTaskDelay()` in application code)
+* Safe to use with FreeRTOS Timer Service Task
+* Zero dynamic allocation after system startup
+* Minimal timer callback logic
+* Seamless integration with `ActiveQueue`
+* Suitable for ISR-safe and RTOS-safe designs
+
+---
+
+=== How It Works
+
+* `SystemTimer` wraps a FreeRTOS software timer
+* When the timer expires, the callback:
+  - creates a `TimerEvent`
+  - sends it to an `ActiveQueue` using `sendFromISR()`
+* The application task receives and processes the event
+
+IMPORTANT:  
+The timer callback executes in the context of the **FreeRTOS Timer Service Task (`Tmr Svc`)**.
+It must never block, allocate memory, or perform heavy logic.
+
+---
+
+=== Timer Event Type
+
+Timers generate a small, deterministic event structure:
+
+[source,cpp]
+----
+enum class TimerEventType : uint8_t {
+    Fired
+};
+
+struct TimerEvent {
+    uint32_t timerId;
+    TimerEventType type;
+};
+----
+
+* `timerId` is user-defined and allows one task to handle multiple timers
+* `type` enables future extensions (e.g. Stop, Restart)
+
+---
+
+=== Class Overview
+
+[source,cpp]
+----
+class SystemTimer {
+public:
+    enum class Mode {
+        OneShot,
+        Periodic
+    };
+
+    SystemTimer(
+        uint32_t timerId,
+        uint32_t periodMs,
+        Mode mode,
+        ActiveQueueRef<TimerEvent> eventQueue
+    );
+
+    bool start();
+    bool stop();
+    bool reset();
+};
+----
+
+---
+
+=== Constructor Parameters
+
+|===
+| Parameter | Description
+
+| `timerId`
+| Application-defined identifier delivered with each timer event
+
+| `periodMs`
+| Timer period in milliseconds
+
+| `mode`
+| `OneShot` or `Periodic`
+
+| `eventQueue`
+| Reference to an existing `ActiveQueue` used to deliver events
+|===
+
+---
+
+=== One-Shot Timer Example
+
+[source,cpp]
+----
+ActiveQueue<TimerEvent> timerQueue(4);
+ActiveQueueRef<TimerEvent> timerQueueRef(timerQueue);
+
+SystemTimer retryTimer(
+    1,
+    1000,
+    SystemTimer::Mode::OneShot,
+    timerQueueRef
+);
+
+retryTimer.start();
+----
+
+---
+
+=== Periodic Timer Example
+
+[source,cpp]
+----
+SystemTimer heartbeatTimer(
+    2,
+    500,
+    SystemTimer::Mode::Periodic,
+    timerQueueRef
+);
+
+heartbeatTimer.start();
+----
+
+---
+
+=== Receiving Timer Events in a Task
+
+[source,cpp]
+----
+void loop() override {
+    TimerEvent evt;
+
+    if (timerQueue.receive(evt, portMAX_DELAY)) {
+        switch (evt.timerId) {
+            case 1:
+                // retry timeout
+                break;
+
+            case 2:
+                // heartbeat
+                break;
+        }
+    }
+}
+----
+
+This approach allows the task to sleep until an event occurs,
+resulting in low CPU usage and deterministic timing behavior.
+
+---
+
+=== RTOS Safety Rules
+
+The following rules are strictly enforced by the design:
+
+* Timer callbacks never block
+* Timer callbacks never allocate memory
+* Timer callbacks never access Serial or logging APIs
+* All application logic runs in normal task context
+
+This makes `SystemTimer` safe to use alongside:
+* ESP-NOW
+* WiFi stack
+* Other ESP-IDF and Arduino background tasks
+
+---
+
+=== Why Use SystemTimer Instead of vTaskDelay()
+
+| `vTaskDelay()` | `SystemTimer` |
+|---------------|---------------|
+| Polling-based | Event-driven |
+| Task blocked | Task sleeps until event |
+| Hard to scale | Easy to manage multiple timers |
+| Logic mixed with timing | Clear separation |
+
+---
+
+=== Typical Use Cases
+
+* Retries and backoff timers
+* Heartbeat / watchdog events
+* Deferred execution
+* Timeouts for communication protocols
+* Periodic status updates
+
+---
+
+=== Summary
+
+`SystemTimer` provides a clean, deterministic, and scalable way to handle
+time-based events in FreeRTOS-based systems.
+
+By combining software timers with `ActiveQueue`, it enables a pure
+event-driven architecture suitable for professional embedded applications
+on ESP32.
+
+
+== Default ESP32 / Arduino Tasks (FreeRTOS)
+
+When using *ESP32 with Arduino framework* (including PlatformIO),
+the system runs **much more than just your application task**.
+
+Arduino on ESP32 is built on top of *ESP-IDF*, which itself uses *FreeRTOS*.
+As a result, the runtime environment consists of multiple system, network,
+and service tasks that are created automatically at startup.
+
+This section explains the most common default tasks you will see when
+calling `vTaskList()` or similar diagnostic APIs.
+
+---
+
+=== Example Task List
+
+Below is an example output from `vTaskList()` on ESP32 with Arduino enabled:
+
+[source,text]
+----
+Name            State  Prio  Stack  Num  Core
+---------------------------------------------
+loopTask        X       1     6220    8    1
+IDLE0           R       0      504    5    0
+IDLE1           R       0      580    6    1
+tiT             B      18     3640   10    0
+ipc1            S      24      488    2    1
+sys_evt         B      20     3444   11    0
+arduino_events  B      19     3136   12    1
+wifi            B      23     4888   13    0
+ipc0            S      24      480    1    0
+esp_timer       S      22     8160    3    0
+Tmr Svc         B       1     3600    7    -
+----
+
+This is a *normal* and *expected* configuration.
+
+---
+
+=== Application-Level Tasks
+
+==== loopTask
+* Created by Arduino framework
+* Executes `setup()` once, then repeatedly calls `loop()`
+* Priority: 1
+* Usually pinned to Core 1
+* This is the main application task for Arduino users
+
+---
+
+=== FreeRTOS System Tasks
+
+==== IDLE0 / IDLE1
+* Idle tasks (one per CPU core)
+* Executed when no other task is ready to run
+* Responsible for:
+  - task cleanup
+  - idle hooks
+* Priority: 0
+
+==== Tmr Svc (Timer Service Task)
+* Handles FreeRTOS software timers (`xTimerCreate`)
+* Executes timer callbacks
+* Priority: 1
+* Required for any FreeRTOS timer usage
+
+---
+
+=== ESP-IDF Core System Tasks
+
+==== esp_timer
+* High-resolution timer service
+* Used internally by:
+  - WiFi
+  - ESP-NOW
+  - Arduino timing functions (`millis()`, `delay()`)
+* Priority: 22
+* Large stack by design
+* **Must never be blocked**
+
+==== sys_evt
+* ESP-IDF system event loop
+* Processes system-level events:
+  - WiFi connect / disconnect
+  - IP acquisition
+* Priority: 20
+
+==== ipc0 / ipc1
+* Inter-Processor Communication tasks
+* Used for synchronization between CPU cores
+* Very high priority (24)
+* Internal system mechanism — do not interact directly
+
+==== tiT
+* Timer interrupt handling task
+* Part of ESP-IDF internal timing subsystem
+* High priority
+* Not user-accessible
+
+---
+
+=== Arduino / Networking Tasks
+
+==== wifi
+* WiFi and networking stack
+* Used by:
+  - WiFi
+  - ESP-NOW
+  - TCP/IP
+* Priority: 23
+* Critical for radio and network operation
+* **User code must never block this task**
+
+==== arduino_events
+* Arduino event dispatcher task
+* Handles:
+  - `WiFi.onEvent()`
+  - Arduino-level callbacks
+* Priority: 19
+
+---
+
+=== Practical Notes for Active RT Framework Users
+
+* The number of default tasks is higher than on bare FreeRTOS systems
+* This is expected and does not indicate misconfiguration
+* Users should:
+  - Avoid blocking system tasks
+  - Use moderate priorities for custom tasks (typically 2–5)
+  - Monitor stack usage and free heap
+* `ActiveTask` instances should be pinned and prioritized consciously
+* ISR handlers (e.g. ESP-NOW receive callbacks) should remain minimal
+  and delegate work via `ActiveQueue`
+
+---
+
+=== Summary
+
+* ESP32 + Arduino runs a full RTOS-based system
+* Multiple system and service tasks are always present
+* Most tasks are internal and should not be modified
+* Application logic should coexist with, not fight against, the runtime
+
+Understanding these default tasks helps design safe, efficient,
+and predictable real-time systems using the Active RT Framework.
+
+
 == StaticString
 
 `StaticString<N>` is a fixed-capacity, real-time safe string class.
