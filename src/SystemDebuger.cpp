@@ -5,14 +5,14 @@
 #include <esp_system.h>
 
 void SystemDebuger::printTaskList() {
-    static char buffer[512];
+    // static char buffer[512];
 
-    Serial.println();
-    Serial.println("Name          State  Prio  Stack  Num");
-    Serial.println("---------------------------------------");
+    // Serial.println();
+    // Serial.println("Name          State  Prio  Stack  Num");
+    // Serial.println("---------------------------------------");
 
-    vTaskList(buffer);
-    Serial.println(buffer);
+    // vTaskList(buffer);
+    // Serial.println(buffer);
 }
 
 void SystemDebuger::printFreeHeap() {
