@@ -30,7 +30,10 @@ public:
 
     ~SystemTimer();
 
+    // Start using the mode configured in the constructor.
     bool start();
+    // Change the period (milliseconds) and start the timer. Note: this does NOT change the mode (one-shot vs periodic).
+    bool start(uint32_t ms);
     bool stop();
     bool reset();
 
@@ -40,4 +43,5 @@ private:
     TimerHandle_t _timer;
     uint32_t _timerId;
     ActiveQueueRef<TimerEvent> _eventQueue;
+    Mode _mode;
 };

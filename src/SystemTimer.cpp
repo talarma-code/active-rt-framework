@@ -7,7 +7,8 @@ SystemTimer::SystemTimer(
     ActiveQueueRef<TimerEvent> eventQueue
 )
     : _timerId(timerId),
-      _eventQueue(eventQueue)
+      _eventQueue(eventQueue),
+      _mode(mode)
 {
     const TickType_t ticks = pdMS_TO_TICKS(periodMs);
     const UBaseType_t autoReload =
@@ -30,6 +31,14 @@ SystemTimer::~SystemTimer() {
 
 bool SystemTimer::start() {
     return (_timer && xTimerStart(_timer, 0) == pdPASS);
+}
+
+bool SystemTimer::start(uint32_t ms) {
+    if (!_timer) return false;
+    const TickType_t ticks = pdMS_TO_TICKS(ms);
+    // Change period; does NOT change auto-reload mode set in constructor.
+    if (xTimerChangePeriod(_timer, ticks, 0) != pdPASS) return false;
+    return xTimerStart(_timer, 0) == pdPASS;
 }
 
 bool SystemTimer::stop() {
