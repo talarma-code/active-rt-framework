@@ -398,6 +398,83 @@ heartbeatTimer.start();
 
 ---
 
+=== SystemTimerT (templated variant)
+
+`SystemTimerT` is a header-only templated variant of `SystemTimer` that does not require
+the framework to know about application-specific message types. Instead of sending
+`TimerEvent` directly, it converts a `TimerEvent` into a user-defined `MessageT` via
+a lightweight, ISR-safe converter functor and delivers `MessageT` to an
+`ActiveQueue<MessageT>` via `ActiveQueueRef<MessageT>`.
+
+==== Key points
+
+* `MessageT` is the type placed on the queue (e.g. `TimerEvent` or a small app-defined struct)
+* `Converter` is a callable: `MessageT operator()(const TimerEvent&)`
+* Converter must be **ISR-safe** (no dynamic allocation, no blocking calls)
+* Default converter `DefaultTimerToMessageConverter<MessageT>` constructs `MessageT` from `TimerEvent`
+
+IMPORTANT: Keep converter logic minimal — the conversion runs in the timer callback
+context (FreeRTOS Timer Service Task) and must not allocate or block.
+
+----
+
+==== Example 1 — Default converter (`MessageT == TimerEvent`)
+
+This is the simplest case — use the default converter and a queue of `TimerEvent`.
+
+[source,cpp]
+----
+ActiveQueue<TimerEvent> timerQueue(4);
+ActiveQueueRef<TimerEvent> timerQueueRef(timerQueue);
+
+// Default converter returns TimerEvent directly, so no extra setup is needed
+SystemTimerT<TimerEvent> tmr(
+    1,
+    1000,
+    SystemTimerT<TimerEvent>::Mode::Periodic,
+    timerQueueRef
+);
+
+tmr.start();
+----
+
+==== Example 2 — Custom converter (application message)
+
+If the application queue uses a custom message type, provide a small converter
+that maps `TimerEvent` to your `MessageT`.
+
+[source,cpp]
+----
+struct MyMsg {
+    uint32_t srcTimerId;
+    uint32_t extra;
+};
+
+struct TimerToMyMsg {
+    MyMsg operator()(const TimerEvent& t) const noexcept {
+        MyMsg m{};
+        m.srcTimerId = t.timerId;
+        m.extra = 0; // fill with application data if required
+        return m;
+    }
+};
+
+ActiveQueue<MyMsg> myQueue(4);
+ActiveQueueRef<MyMsg> myQueueRef(myQueue);
+
+SystemTimerT<MyMsg, TimerToMyMsg> myTimer(
+    2,
+    500,
+    SystemTimerT<MyMsg, TimerToMyMsg>::Mode::OneShot,
+    myQueueRef,
+    TimerToMyMsg()
+);
+
+myTimer.start();
+----
+
+---
+
 === Receiving Timer Events in a Task
 
 [source,cpp]
