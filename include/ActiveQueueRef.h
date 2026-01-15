@@ -12,6 +12,8 @@
 template<typename T>
 class ActiveQueueRef {
 public:
+    ActiveQueueRef() = default;
+
     explicit ActiveQueueRef(QueueHandle_t queueHandle)
         : handle(queueHandle)
     {

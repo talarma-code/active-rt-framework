@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <cstdio>
 
 
 /**
@@ -112,6 +113,47 @@ public:
         buffer_[length_++] = c;
         buffer_[length_] = '\0';
         return true;
+    }
+
+    // -------- Formatting --------
+
+    /**
+     * @brief Format string into internal buffer using snprintf-style API.
+     *
+     * Writes at most N characters plus null terminator into the buffer.
+     * On truncation, the buffer still contains a valid, null-terminated string.
+     *
+     * @param format printf-style format string
+     * @param args   printf-style arguments
+     * @return number of characters that would have been written (excluding null terminator),
+     *         or negative value on error (same semantics as std::snprintf)
+     */
+    template<typename... Args>
+    int snprintf(const char* format, Args... args) {
+        if (!format) {
+            clear();
+            return -1;
+        }
+
+        int result = std::snprintf(buffer_, sizeof(buffer_), format, args...);
+
+        if (result < 0) {
+            clear();
+            return result;
+        }
+
+        // std::snprintf returns the number of characters that would have been written
+        // (excluding the null terminator). Clamp length_ to capacity N.
+        if (static_cast<size_t>(result) > N) {
+            length_ = N;
+        } else {
+            length_ = static_cast<size_t>(result);
+        }
+
+        // Ensure null-termination at the end of the used buffer.
+        buffer_[length_] = '\0';
+
+        return result;
     }
 
     // -------- Comparison --------
