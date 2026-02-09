@@ -39,8 +39,28 @@ public:
      */
     void start();
 
+    /**
+     * @brief Initialize global task watchdog (shared timeout for all tasks)
+     *        Should be called once from setup(), before any tasks start.
+     */
+    static void initWatchdog(uint32_t timeoutSeconds = 10);
+
+    /**
+     * @brief Enable or disable watchdog monitoring for this task.
+     *        Call this before start() to register the task in watchdog.
+     */
+    void enableWatchdog(bool enable = true);
+
+    /**
+     * @brief Manually reset (feed) the task watchdog for this task.
+     *        If watchdog is disabled or not initialized, this is a no-op.
+     *        Aplikacja powinna wywoływać to częściej niż timeout watchdoga.
+     */
+    void resetWatchdog();
+
 protected:
     TaskHandle_t taskHandle = nullptr;
+    bool watchdogEnabled = false;
 
 private:
     /**
@@ -52,4 +72,7 @@ private:
     uint32_t taskStackSize;
     UBaseType_t taskPriority;
     BaseType_t taskCore;
+
+    static bool watchdogInitialized;
+    static uint32_t watchdogTimeoutSeconds;
 };

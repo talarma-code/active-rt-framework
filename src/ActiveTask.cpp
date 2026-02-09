@@ -1,4 +1,8 @@
 #include "ActiveTask.h"
+#include "esp_task_wdt.h"
+
+bool ActiveTask::watchdogInitialized = false;
+uint32_t ActiveTask::watchdogTimeoutSeconds = 0;
 
 ActiveTask::ActiveTask(
     const char* name,
@@ -11,6 +15,24 @@ ActiveTask::ActiveTask(
       taskPriority(priority),
       taskCore(core)
 {
+}
+
+void ActiveTask::initWatchdog(uint32_t timeoutSeconds) {
+    if (!watchdogInitialized) {
+        esp_task_wdt_init(timeoutSeconds, true);
+        watchdogTimeoutSeconds = timeoutSeconds;
+        watchdogInitialized = true;
+    }
+}
+
+void ActiveTask::enableWatchdog(bool enable) {
+    watchdogEnabled = enable;
+}
+
+void ActiveTask::resetWatchdog() {
+    if (watchdogInitialized && watchdogEnabled) {
+        esp_task_wdt_reset();
+    }
 }
 
 void ActiveTask::start() {
@@ -43,10 +65,16 @@ void ActiveTask::start() {
 void ActiveTask::taskEntryPoint(void* param) {
     ActiveTask* instance = static_cast<ActiveTask*>(param);
 
+    if (watchdogInitialized && instance->watchdogEnabled) {
+        // Register current FreeRTOS task in Task Watchdog
+        esp_task_wdt_add(nullptr);
+    }
+
     instance->setup();
 
     while (true) {
         instance->loop();
+
         taskYIELD(); // or vTaskDelay(...)
     }
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
@@ -11,6 +12,11 @@
 template<typename T>
 class ActiveQueue {
 public:
+    // Special timeout values (in milliseconds domain)
+    // kWaitForeverMs is a sentinel mapped to portMAX_DELAY in FreeRTOS ticks
+    static constexpr uint32_t kWaitForeverMs    = UINT32_MAX;
+    static constexpr uint32_t kDefaultTimeoutMs = 500; // 500 ms
+
     /**
      * @param length number of elements in queue
      */
@@ -31,12 +37,26 @@ public:
 
     // -------- Task context API --------
 
-    bool send(const T& item, TickType_t timeout = portMAX_DELAY) {
-        return xQueueSend(handle, &item, timeout) == pdTRUE;
+    // timeoutMs is expressed in milliseconds. Use kWaitForeverMs to wait forever.
+    bool send(const T& item, uint32_t timeoutMs = kDefaultTimeoutMs) {
+        TickType_t ticks;
+        if (timeoutMs == kWaitForeverMs) {
+            ticks = portMAX_DELAY;
+        } else {
+            ticks = pdMS_TO_TICKS(timeoutMs);
+        }
+        return xQueueSend(handle, &item, ticks) == pdTRUE;
     }
 
-    bool receive(T& out, TickType_t timeout = portMAX_DELAY) {
-        return xQueueReceive(handle, &out, timeout) == pdTRUE;
+    // timeoutMs is expressed in milliseconds. Use kWaitForeverMs to wait forever.
+    bool receive(T& out, uint32_t timeoutMs = kDefaultTimeoutMs) {
+        TickType_t ticks;
+        if (timeoutMs == kWaitForeverMs) {
+            ticks = portMAX_DELAY;
+        } else {
+            ticks = pdMS_TO_TICKS(timeoutMs);
+        }
+        return xQueueReceive(handle, &out, ticks) == pdTRUE;
     }
 
     // -------- ISR context API --------

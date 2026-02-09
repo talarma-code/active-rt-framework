@@ -19,59 +19,77 @@ type-safe C++ abstractions.
 
 * Deterministic execution
 * No dynamic allocation during runtime
-* ISR-safe APIs
-* Explicit ownership and lifetime
-* Suitable for ESP32 + Arduino + PlatformIO
-
-=== Core Principles
-
-* Objects using FreeRTOS primitives must be created *after* the scheduler starts
-* ISR code must be minimal and non-blocking
-* Ownership must be explicit — no hidden globals or magic singletons
-
-=== Typical Data Flow
-
-[source]
-----
-ISR
- ↓
-ActivePool::acquireFromISR()
- ↓
-ActiveQueue<T*>
- ↓
-ActiveTask
- ↓
-ActivePool::release()
-----
-
-== ActiveTask
-
-`ActiveTask` is an object-oriented wrapper around a FreeRTOS task.
-
-It allows implementing tasks as C++ classes using `setup()` and `loop()`
-methods, similar to the Arduino programming model.
-
-=== OS Mechanism
-
-* Wraps `xTaskCreate()` / `xTaskCreatePinnedToCore()`
-* Uses a static task entry point internally
-* Runs on top of the FreeRTOS scheduler
-
-=== Lifecycle
-
-[source]
-----
-taskEntryPoint()
- ├─ setup()   // called once
  └─ loop()    // called repeatedly
 ----
 
 === Characteristics
 
+
+=== Watchdog Usage Example
+
+This example shows how to enable the Task Watchdog for an `ActiveTask`-based
+worker task and feed it from `loop()`:
+
+[source,cpp]
+----
+class CommsTask : public ActiveTask {
+public:
+    CommsTask()
+        : ActiveTask("comms", 4096, 3) {}
+
+    void setup() override {
+        // initialization
+    }
+
+    void loop() override {
+        // communication logic
+
+        // feed task watchdog for this ActiveTask instance
+        resetWatchdog();
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+};
+
+CommsTask commsTask;
+
+void initTasks() {
+    // Initialize global Task WDT once (shared timeout for all ActiveTask instances)
+    ActiveTask::initWatchdog(10); // seconds
+
+    // Enable watchdog monitoring for this specific task
+    commsTask.enableWatchdog(true);
+
+    // Start the FreeRTOS task
+    commsTask.start();
+}
+----
 * FreeRTOS-specific
 * Cooperative by default (explicit delay or yield)
 * No implicit blocking
 * Clear ownership of task resources
+
+=== Task Watchdog Integration (ESP32 Task WDT)
+
+`ActiveTask` optionally integrates with the ESP32 *Task Watchdog* (`esp_task_wdt`).
+
+Key APIs:
+
+* `static void initWatchdog(uint32_t timeoutSeconds)`
+** Initializes the global Task WDT with a *shared timeout* for all registered tasks
+** Must be called once from `setup()` / main initialization code
+* `void enableWatchdog(bool enable = true)`
+** Enables or disables watchdog monitoring for a given `ActiveTask` instance
+** Must be called *before* `start()` to register the FreeRTOS task in the watchdog
+* `void resetWatchdog()`
+** Feeds the Task WDT for this task
+** Should be called from `loop()` often enough to stay within `timeoutSeconds`
+
+Notes:
+
+* All tasks share the same timeout configured via `initWatchdog()`
+* Internally `ActiveTask` uses `esp_task_wdt_add(nullptr)` in the task entry point
+* Tasks that may legally block for long periods *should not* enable the Task WDT
 
 === Example
 
@@ -83,7 +101,39 @@ public:
         : ActiveTask("worker", 4096, 2) {}
 
     void setup() override {
-        // initialization
+----
+
+=== Watchdog Usage Example
+
+Typical pattern on ESP32 with Arduino:
+
+[source,cpp]
+----
+WorkerTask commsTask;
+WorkerTask loggerTask;
+
+void setup() {
+    // 1) Initialize global Task WDT (shared timeout)
+    ActiveTask::initWatchdog(10); // seconds
+
+    // 2) Optionally monitor the Arduino loop task as well
+    esp_task_wdt_add(nullptr);
+
+    // 3) Enable watchdog for selected ActiveTask instances
+    commsTask.enableWatchdog(true);
+    loggerTask.enableWatchdog(true);
+
+    commsTask.start();
+    loggerTask.start();
+}
+
+void loop() {
+    // Application logic
+    // ...
+
+    // Feed watchdog for Arduino loop task
+    esp_task_wdt_reset();
+}
     }
 
     void loop() override {
@@ -114,6 +164,19 @@ It is used for communication between tasks and from ISR to task.
 * Thread-safe and ISR-safe
 * No allocation after construction
 
+==== Timeout Semantics
+
+All `send` / `receive` timeouts are expressed in **milliseconds**.
+
+Each `ActiveQueue<T>` exposes two constants:
+
+* `ActiveQueue<T>::kDefaultTimeoutMs`
+** Default timeout used when no explicit value is provided
+** In the current implementation: `500` ms
+* `ActiveQueue<T>::kWaitForeverMs`
+** Sentinel value mapped to `portMAX_DELAY` in FreeRTOS ticks
+** Use this when you intentionally want to block forever
+
 ==== Example
 
 [source,cpp]
@@ -125,10 +188,10 @@ struct Message {
 ActiveQueue<Message> queue(10);
 
 Message msg{42};
-queue.send(msg);
+queue.send(msg); // uses kDefaultTimeoutMs (non-infinite wait)
 
 Message rx;
-queue.receive(rx, portMAX_DELAY);
+queue.receive(rx, ActiveQueue<Message>::kWaitForeverMs);
 ----
 
 ==== ISR Usage
@@ -154,6 +217,11 @@ It allows passing queue access into tasks without transferring ownership.
 * Lightweight wrapper (stores only `QueueHandle_t`)
 * Same API as `ActiveQueue<T>`
 * Does not create or delete the queue
+
+`ActiveQueueRef<T>` also exposes the same timeout constants:
+
+* `ActiveQueueRef<T>::kDefaultTimeoutMs`
+* `ActiveQueueRef<T>::kWaitForeverMs`
 
 ==== Example
 
@@ -482,7 +550,7 @@ myTimer.start();
 void loop() override {
     TimerEvent evt;
 
-    if (timerQueue.receive(evt, portMAX_DELAY)) {
+    if (timerQueue.receive(evt, ActiveQueue<TimerEvent>::kWaitForeverMs)) {
         switch (evt.timerId) {
             case 1:
                 // retry timeout
@@ -727,6 +795,10 @@ must be constructed *after* the FreeRTOS scheduler is initialized.
 WARNING: Avoid static initialization and classic singleton patterns.
 
 TIP: Prefer explicit ownership and dependency injection.
+
+TIP: Use finite queue timeouts by default (e.g. `kDefaultTimeoutMs = 500`) and
+only use `kWaitForeverMs` when a true infinite wait is intentional and safe
+for the given task.
 
 == Design Philosophy
 
